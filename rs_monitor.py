@@ -31,6 +31,8 @@ WATCHLIST = {
     "475830": "오름테라퓨틱",
 }
 
+
+
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 RUN_MODE         = os.environ.get("RUN_MODE", "full")

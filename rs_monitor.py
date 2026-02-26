@@ -24,8 +24,6 @@ WATCHLIST = {
     "000270": "기아",
     "006800": "미래에셋증권",
     "066570": "LG전자",
-    "069500": "KODEX200",
-    "229200": "KODEX코스닥150",
     "328130": "루닛",
     "319400": "현대무벡스",
     "475830": "오름테라퓨틱",
@@ -55,8 +53,7 @@ def build_universe_rs(start, end):
         return pd.read_csv(cache_file, dtype={"Code": str})
     kospi  = fdr.StockListing("KOSPI")[["Code","Name"]]
     kosdaq = fdr.StockListing("KOSDAQ")[["Code","Name"]]
-    etf    = fdr.StockListing("ETF/KR")[["Code","Name"]]
-    tickers = pd.concat([kospi, kosdaq, etf], ignore_index=True)
+    tickers = pd.concat([kospi, kosdaq], ignore_index=True)
     records = []
     for _, row in tickers.iterrows():
         try:

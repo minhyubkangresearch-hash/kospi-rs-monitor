@@ -2,8 +2,20 @@ name: Daily KOSPI RS Monitor
 
 on:
   schedule:
+    - cron: '50 23 * * 0-4'
+    - cron: '30 4 * * 1-5'
     - cron: '30 7 * * 1-5'
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: '실행 모드 선택'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - morning
+          - intraday
 
 jobs:
   run-rs-monitor:
@@ -22,13 +34,44 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore RS cache
+        uses: actions/cache@v4
+        with:
+          path: rs_cache_*.csv
+          key: rs-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            rs-cache-${{ runner.os }}-
+
+      - name: Restore RS report
+        uses: actions/cache@v4
+        with:
+          path: rs_report_*.csv
+          key: rs-report-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            rs-report-${{ runner.os }}-
+
+      - name: Determine run mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.run_mode }}" >> $GITHUB_OUTPUT
+          elif [ "$(date -u +%H:%M)" \< "01:00" ]; then
+            echo "mode=morning" >> $GITHUB_OUTPUT
+          elif [ "$(date -u +%H:%M)" \< "06:00" ]; then
+            echo "mode=intraday" >> $GITHUB_OUTPUT
+          else
+            echo "mode=full" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run RS Monitor
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_MODE:         ${{ steps.mode.outputs.mode }}
         run: python rs_monitor.py
 
       - name: Upload RS report CSV
+        if: steps.mode.outputs.mode == 'full'
         uses: actions/upload-artifact@v4
         with:
           name: rs-report-${{ github.run_id }}
@@ -36,7 +79,6 @@ jobs:
           retention-days: 30
 
       - name: Keep repo alive
-        if: github.event.schedule == '30 7 * * 1-5'
         run: |
           git config user.email "action@github.com"
           git config user.name "GitHub Action"

@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-KOSPI Daily RS Monitor v2
-- 오전 8:50 KST: 전일 RS 리포트 재전송 + 기관 수급 방향
-- 오후 4:30 KST: 당일 RS 신규 계산 (메인 실행)
-- 장 중 13:30 KST: 기관 순매수 금액만 체크
-"""
-
-import os
-import time
+import os, time, glob
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -19,11 +11,9 @@ try:
     import FinanceDataReader as fdr
     from pykrx import stock as krx
 except ImportError:
-    print("pip install finance-datareader pykrx requests 를 먼저 실행하세요.")
     raise
 
 WATCHLIST = {
-    #코스피
     "005930": "삼성전자",
     "000660": "SK하이닉스",
     "035420": "NAVER",
@@ -34,141 +24,110 @@ WATCHLIST = {
     "000270": "기아",
     "006800": "미래에셋증권",
     "066570": "LG전자",
-    #ETF
     "069500": "KODEX200",
     "229200": "KODEX코스닥150",
-    #코스닥
     "328130": "루닛",
     "319400": "현대무벡스",
     "475830": "오름테라퓨틱",
 }
 
-
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 RUN_MODE         = os.environ.get("RUN_MODE", "full")
-
 QUARTER = 63
 
 def calc_rs_score(prices):
-    n = len(prices)
-    if n < QUARTER * 4:
+    if len(prices) < QUARTER * 4:
         return np.nan
     def qr(s, e):
         return prices.iloc[-e] / prices.iloc[-s] - 1
     try:
-        q1 = qr(QUARTER,         1)
-        q2 = qr(QUARTER * 2,     QUARTER)
-        q3 = qr(QUARTER * 3, QUARTER * 2)
-        q4 = qr(QUARTER * 4, QUARTER * 3)
-        return q1 * 2 + q2 + q3 + q4
-    except (IndexError, ZeroDivisionError):
+        return qr(QUARTER,1)*2 + qr(QUARTER*2,QUARTER) + qr(QUARTER*3,QUARTER*2) + qr(QUARTER*4,QUARTER*3)
+    except:
         return np.nan
 
-def build_universe_rs(start, end, sleep=0.05):
-    cache_file = f"rs_cache_{end}.csv"
+def build_universe_rs(start, end):
+    cache_file = "rs_cache_{}.csv".format(end)
     if os.path.exists(cache_file):
-        print(f"[캐시 로드] {cache_file}")
+        print("[캐시 로드] " + cache_file)
         return pd.read_csv(cache_file, dtype={"Code": str})
-    kospi   = fdr.StockListing("KOSPI")[["Code", "Name"]]
-    kosdaq  = fdr.StockListing("KOSDAQ")[["Code", "Name"]]
-    etf     = fdr.StockListing("ETF/KR")[["Code", "Name"]]
+    kospi  = fdr.StockListing("KOSPI")[["Code","Name"]]
+    kosdaq = fdr.StockListing("KOSDAQ")[["Code","Name"]]
+    etf    = fdr.StockListing("ETF/KR")[["Code","Name"]]
     tickers = pd.concat([kospi, kosdaq, etf], ignore_index=True)
     records = []
     for _, row in tickers.iterrows():
-        code, name = row["Code"], row["Name"]
         try:
-            df = fdr.DataReader(code, start, end)
-            if df.empty or len(df) < QUARTER * 4:
+            df = fdr.DataReader(row["Code"], start, end)
+            if df.empty or len(df) < QUARTER*4:
                 continue
             score = calc_rs_score(df["Close"])
             if not np.isnan(score):
-                records.append({"Code": code, "Name": name, "Score": score})
-            time.sleep(sleep)
-        except Exception:
+                records.append({"Code": row["Code"], "Name": row["Name"], "Score": score})
+            time.sleep(0.05)
+        except:
             pass
-    universe = pd.DataFrame(records)
-    universe["Rank"] = universe["Score"].rank(ascending=True)
-    universe["RS"]   = ((universe["Rank"] - 1) / (len(universe) - 1) * 98 + 1).astype(int)
-    universe.to_csv(cache_file, index=False)
-    print(f"[완료] {len(universe)}개 종목 RS 계산 → {cache_file}")
-    return universe
+    u = pd.DataFrame(records)
+    u["Rank"] = u["Score"].rank(ascending=True)
+    u["RS"]   = ((u["Rank"]-1)/(len(u)-1)*98+1).astype(int)
+    u.to_csv(cache_file, index=False)
+    print("[완료] {}개 종목 → {}".format(len(u), cache_file))
+    return u
 
 def rs_line_slope(prices, kospi, window=20):
-    aligned = prices.align(kospi, join="inner")
-    rs_line = aligned[0] / aligned[1]
-    if len(rs_line) < window + 1:
+    a, b = prices.align(kospi, join="inner")
+    rs = a / b
+    if len(rs) < window+1:
         return np.nan
-    return round((rs_line.iloc[-1] / rs_line.iloc[-window] - 1) * 100, 2)
+    return round((rs.iloc[-1]/rs.iloc[-window]-1)*100, 2)
 
 def minervini_check(prices):
     if len(prices) < 260:
         return False
-    c     = prices.iloc[-1]
-    ma50  = prices.tail(50).mean()
-    ma150 = prices.tail(150).mean()
-    ma200 = prices.tail(200).mean()
-    prev_ma200 = prices.tail(220).head(200).mean()
-    hi52  = prices.tail(260).max()
-    lo52  = prices.tail(260).min()
-    return (
-        c > ma50 > ma150 > ma200 > prev_ma200
-        and c > lo52 * 1.30
-        and c >= hi52 * 0.75
-    )
+    c = prices.iloc[-1]
+    ma50, ma150, ma200 = prices.tail(50).mean(), prices.tail(150).mean(), prices.tail(200).mean()
+    prev200 = prices.tail(220).head(200).mean()
+    hi52, lo52 = prices.tail(260).max(), prices.tail(260).min()
+    return (c > ma50 > ma150 > ma200 > prev200 and c > lo52*1.30 and c >= hi52*0.75)
 
 def get_inst_net_buy(date_str):
     try:
         df = krx.get_market_trading_value_by_date(date_str, date_str, "KOSPI")
-        if df.empty:
-            return 0.0
-        return df["기관합계"].iloc[-1] / 1e8
-    except Exception:
+        return 0.0 if df.empty else df["기관합계"].iloc[-1]/1e8
+    except:
         return 0.0
 
 def get_inst_trend(days=5):
-    results = []
-    today = dt.date.today()
-    checked = 0
-    delta = 0
+    results, today, checked, delta = [], dt.date.today(), 0, 0
     while checked < days:
         d = today - dt.timedelta(days=delta)
         delta += 1
         if d.weekday() >= 5:
             continue
-        date_str = d.strftime("%Y%m%d")
         try:
-            df = krx.get_market_trading_value_by_date(date_str, date_str, "KOSPI")
+            df = krx.get_market_trading_value_by_date(d.strftime("%Y%m%d"), d.strftime("%Y%m%d"), "KOSPI")
             if not df.empty:
-                val = df["기관합계"].iloc[-1] / 1e8
-                results.append((d.strftime("%m/%d"), val))
+                results.append((d.strftime("%m/%d"), df["기관합계"].iloc[-1]/1e8))
                 checked += 1
-        except Exception:
+        except:
             pass
     return list(reversed(results))
 
-def send_telegram(message):
+def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[Telegram 미설정]\n", message)
+        print(msg)
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    resp = requests.post(url, data={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-    })
-    if resp.status_code != 200:
-        print(f"[Telegram 오류] {resp.text}")
+    requests.post(
+        "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_TOKEN),
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+    )
 
 def run_full():
-    today     = dt.date.today()
+    today = dt.date.today()
     end_str   = today.strftime("%Y%m%d")
     start_str = (today - dt.timedelta(days=420)).strftime("%Y%m%d")
-    kospi_df     = fdr.DataReader("KS11", start_str, end_str)
-    kospi_prices = kospi_df["Close"]
-    inst_net     = get_inst_net_buy(end_str)
-    inst_icon    = "🟢" if inst_net > 0 else "🔴"
-    print("RS 유니버스 계산 중...")
+    kospi_prices = fdr.DataReader("KS11", start_str, end_str)["Close"]
+    inst_net  = get_inst_net_buy(end_str)
     universe  = build_universe_rs(start_str, end_str)
     rs_lookup = dict(zip(universe["Code"], universe["RS"]))
     results = []
@@ -177,104 +136,77 @@ def run_full():
             df = fdr.DataReader(code, start_str, end_str)
             if df.empty:
                 continue
-            prices    = df["Close"]
-            rs_rating = rs_lookup.get(code, None)
-            slope     = rs_line_slope(prices, kospi_prices)
-            trend_ok  = minervini_check(prices)
-            hi52      = prices.tail(260).max()
-            pct_hi    = round((prices.iloc[-1] / hi52 - 1) * 100, 1)
-            vol       = df["Volume"].iloc[-1]
-            vol_avg   = df["Volume"].tail(20).mean()
-            vol_ratio = round(vol / vol_avg, 2) if vol_avg > 0 else np.nan
+            prices = df["Close"]
+            vol_avg = df["Volume"].tail(20).mean()
             results.append({
-                "종목명": name, "RS": rs_rating,
-                "RS라인(20일%)": slope, "미너비니": "✅" if trend_ok else "—",
-                "52주고점대비(%)": pct_hi, "거래량비율": vol_ratio,
+                "종목명": name,
+                "RS": rs_lookup.get(code, None),
+                "RS라인(20일%)": rs_line_slope(prices, kospi_prices),
+                "미너비니": "V" if minervini_check(prices) else "-",
+                "52주고점대비(%)": round((prices.iloc[-1]/prices.tail(260).max()-1)*100, 1),
+                "거래량비율": round(df["Volume"].iloc[-1]/vol_avg, 2) if vol_avg > 0 else np.nan,
             })
         except Exception as e:
-            print(f"  [{name}] 오류: {e}")
-    df_result = pd.DataFrame(results).sort_values("RS", ascending=False)
-    df_result.to_csv(f"rs_report_{end_str}.csv", index=False, encoding="utf-8-sig")
-    lines = [f"📊 *KOSPI RS 마감 리포트 [{today.strftime('%m/%d')} 종가 기준]*",
-             f"{inst_icon} 기관 순매수: {inst_net:+.0f}억", ""]
-    for _, r in df_result.iterrows():
-        rs   = r["RS"]
+            print("[{}] 오류: {}".format(name, e))
+    df_r = pd.DataFrame(results).sort_values("RS", ascending=False)
+    df_r.to_csv("rs_report_{}.csv".format(end_str), index=False, encoding="utf-8-sig")
+    icon = "🟢" if inst_net > 0 else "🔴"
+    lines = ["📊 *KOSPI RS 마감 리포트 [{}]*".format(today.strftime("%m/%d")),
+             "{} 기관 순매수: {:+.0f}억".format(icon, inst_net), ""]
+    for _, r in df_r.iterrows():
+        rs = r["RS"]
         flag = "🔥" if rs and rs >= 90 else ("✅" if rs and rs >= 80 else "⚪")
-        lines.append(
-            f"{flag} *{r['종목명']}*  RS={rs}  "
-            f"RS라인: {r['RS라인(20일%)']:+.1f}%  "
-            f"거래량: {r['거래량비율']}x  {r['미너비니']}"
-        )
+        lines.append("{} *{}*  RS={}  RS라인: {:+.1f}%  거래량: {}x  {}".format(
+            flag, r["종목명"], rs, r["RS라인(20일%)"], r["거래량비율"], r["미너비니"]))
     send_telegram("\n".join(lines))
-    print(df_result.to_string(index=False))
+    print(df_r.to_string(index=False))
 
 def run_morning():
-    import glob
     today = dt.date.today()
-    cache_files = sorted(glob.glob("rs_cache_*.csv"), reverse=True)
-    if not cache_files:
-        send_telegram("⚠️ 캐시 없음 — 오후 4:30 리포트를 먼저 실행하세요.")
+    caches  = sorted(glob.glob("rs_cache_*.csv"), reverse=True)
+    reports = sorted(glob.glob("rs_report_*.csv"), reverse=True)
+    if not caches or not reports:
+        send_telegram("캐시 없음 — 오후 4:30 full 모드를 먼저 실행하세요.")
         return
-    cache_date = cache_files[0].replace("rs_cache_", "").replace(".csv", "")
-    report_files = sorted(glob.glob("rs_report_*.csv"), reverse=True)
-    if not report_files:
-        send_telegram("⚠️ 리포트 없음 — 오후 4:30 리포트를 먼저 실행하세요.")
-        return
-    df_result = pd.read_csv(report_files[0])
+    cache_date = caches[0].replace("rs_cache_","").replace(".csv","")
+    df_r  = pd.read_csv(reports[0])
     trend = get_inst_trend(days=5)
-    trend_lines = []
-    for date_label, val in trend:
-        icon = "🟢" if val > 0 else "🔴"
-        trend_lines.append(f"  {icon} {date_label}: {val:+.0f}억")
+    tlines = ["  {} {}: {:+.0f}억".format("🟢" if v>0 else "🔴", d, v) for d,v in trend]
     lines = [
-        f"🌅 *장 시작 브리핑 [{today.strftime('%m/%d')} 08:50]*",
-        f"📋 기준: {cache_date[:4]}.{cache_date[4:6]}.{cache_date[6:]} 종가",
-        "",
-        "*최근 5일 기관 순매수 추이*",
-    ] + trend_lines + ["", "*관심종목 RS 현황*", ""]
-    for _, r in df_result.sort_values("RS", ascending=False).iterrows():
-        rs   = r["RS"]
+        "🌅 *장 시작 브리핑 [{}]*".format(today.strftime("%m/%d")),
+        "📋 기준: {}.{}.{} 종가".format(cache_date[:4], cache_date[4:6], cache_date[6:]),
+        "", "*최근 5일 기관 순매수 추이*",
+    ] + tlines + ["", "*관심종목 RS 현황*", ""]
+    for _, r in df_r.sort_values("RS", ascending=False).iterrows():
+        rs = r["RS"]
         flag = "🔥" if rs >= 90 else ("✅" if rs >= 80 else "⚪")
-        lines.append(
-            f"{flag} *{r['종목명']}*  RS={rs}  "
-            f"RS라인: {r['RS라인(20일%)']:+.1f}%  {r['미너비니']}"
-        )
+        lines.append("{} *{}*  RS={}  RS라인: {:+.1f}%  {}".format(
+            flag, r["종목명"], rs, r["RS라인(20일%)"], r["미너비니"]))
     send_telegram("\n".join(lines))
-    print("모닝 브리핑 전송 완료")
 
 def run_intraday():
     today    = dt.date.today()
-    end_str  = today.strftime("%Y%m%d")
-    inst_net = get_inst_net_buy(end_str)
-    inst_icon = "🟢" if inst_net > 0 else "🔴"
-    if inst_net > 3000:
-        signal = "💪 강한 유입 — 매매 적극 유지"
-    elif inst_net > 0:
-        signal = "👀 순유입 — 관망 유지"
-    elif inst_net > -3000:
-        signal = "⚠️ 소폭 이탈 — 주의"
-    else:
-        signal = "🚨 강한 이탈 — 포지션 점검 필요"
+    inst_net = get_inst_net_buy(today.strftime("%Y%m%d"))
+    icon = "🟢" if inst_net > 0 else "🔴"
+    if inst_net > 3000:    signal = "💪 강한 유입 — 매매 적극 유지"
+    elif inst_net > 0:     signal = "👀 순유입 — 관망 유지"
+    elif inst_net > -3000: signal = "⚠️ 소폭 이탈 — 주의"
+    else:                  signal = "🚨 강한 이탈 — 포지션 점검 필요"
     now_kst = dt.datetime.utcnow() + dt.timedelta(hours=9)
     lines = [
-        f"📡 *장 중 기관 수급 체크 [{now_kst.strftime('%m/%d %H:%M')} KST]*",
-        f"{inst_icon} 기관 순매수(당일 누적): *{inst_net:+.0f}억*",
-        f"→ {signal}",
-        "",
-        "_※ RS 수치는 종가 확정 후 오후 4:30 리포트를 참고하세요_"
+        "📡 *장 중 기관 수급 체크 [{}]*".format(now_kst.strftime("%m/%d %H:%M")),
+        "{} 기관 순매수(당일 누적): *{:+.0f}억*".format(icon, inst_net),
+        "→ " + signal, "",
+        "_RS 수치는 오후 4:30 마감 리포트를 참고하세요_"
     ]
     send_telegram("\n".join(lines))
-    print("장 중 수급 체크 전송 완료")
 
 def main():
     mode = RUN_MODE.strip().lower()
-    print(f"[실행 모드] {mode}")
-    if mode == "morning":
-        run_morning()
-    elif mode == "intraday":
-        run_intraday()
-    else:
-        run_full()
+    print("[실행 모드] " + mode)
+    if mode == "morning":    run_morning()
+    elif mode == "intraday": run_intraday()
+    else:                    run_full()
 
 if __name__ == "__main__":
     main()

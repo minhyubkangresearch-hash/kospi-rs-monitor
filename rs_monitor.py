@@ -71,7 +71,10 @@ def build_universe_rs(start, end, sleep=0.05):
     if os.path.exists(cache_file):
         print(f"[캐시 로드] {cache_file}")
         return pd.read_csv(cache_file, dtype={"Code": str})
-    tickers = fdr.StockListing("KOSPI")[["Code", "Name"]]
+    kospi   = fdr.StockListing("KOSPI")[["Code", "Name"]]
+    kosdaq  = fdr.StockListing("KOSDAQ")[["Code", "Name"]]
+    etf     = fdr.StockListing("ETF/KR")[["Code", "Name"]]
+    tickers = pd.concat([kospi, kosdaq, etf], ignore_index=True)
     records = []
     for _, row in tickers.iterrows():
         code, name = row["Code"], row["Name"]
